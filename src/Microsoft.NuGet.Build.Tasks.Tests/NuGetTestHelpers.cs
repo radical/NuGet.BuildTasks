@@ -26,13 +26,13 @@ namespace Microsoft.NuGet.Build.Tasks.Tests
             TryGetRuntimeVersion tryGetRuntimeVersion = null,
             bool includeFrameworkReferences = true,
             string projectJsonFileContents = null,
-            IEnumerable<ITaskItem> projectReferencesCreatingPackages = null)
+            IEnumerable<ITaskItem> projectReferencesCreatingPackages = null,
+            bool createTemporaryFolderForPackages = true)
         {
             var rootDirectory = new TempRoot();
             using (rootDirectory)
             {
                 var projectDirectory = rootDirectory.CreateDirectory();
-                var packagesDirectory = rootDirectory.CreateDirectory();
 
                 var projectLockJsonFile = projectDirectory.CreateFile("project.lock.json");
                 projectLockJsonFile.WriteAllText(projectLockJsonFileContents);
@@ -43,21 +43,41 @@ namespace Microsoft.NuGet.Build.Tasks.Tests
                     projectJsonFile.WriteAllText(projectJsonFileContents);
                 }
 
-                var filesInPackages = new HashSet<string>(
-                    GetFakeFileNamesFromPackages(projectLockJsonFileContents, packagesDirectory.Path),
-                    StringComparer.OrdinalIgnoreCase);
+                var filesInPackages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                DisposableDirectory packagesDirectory = null;
+
+                if (createTemporaryFolderForPackages)
+                {
+                    packagesDirectory = rootDirectory.CreateDirectory();
+
+                    foreach (var fileInPackage in GetFakeFileNamesFromPackages(projectLockJsonFileContents, packagesDirectory.Path))
+                    {
+                        filesInPackages.Add(fileInPackage);
+                    }
+                }
+                else
+                {
+                    // We will assume there is a location in the lock file we're using
+                    var lockFile = JObject.Parse(projectLockJsonFileContents);
+                    var firstLocation = ((JObject)lockFile["packageFolders"]).Properties().First().Name;
+
+                    foreach (var fileInPackage in GetFakeFileNamesFromPackages(projectLockJsonFileContents, firstLocation))
+                    {
+                        filesInPackages.Add(fileInPackage);
+                    }
+                }
 
                 // Don't require the packages be restored on the machine
-                DirectoryExists directoryExists = path => path.StartsWith(packagesDirectory.Path) || Directory.Exists(path);
+                ResolveNuGetPackageAssets task = null;
                 FileExists fileExists = path => filesInPackages.Contains(path) || File.Exists(path);
 
-                ResolveNuGetPackageAssets task = new ResolveNuGetPackageAssets(directoryExists, fileExists, tryGetRuntimeVersion);
+                task = new ResolveNuGetPackageAssets(fileExists, tryGetRuntimeVersion);
                 var sw = new StringWriter();
                 task.BuildEngine = new MockBuildEngine(sw);
 
                 task.AllowFallbackOnTargetSelection = allowFallbackOnTargetSelection;
                 task.IncludeFrameworkReferences = includeFrameworkReferences;
-                task.NuGetPackagesDirectory = packagesDirectory.Path;
+                task.NuGetPackagesDirectory = packagesDirectory?.Path;
                 task.RuntimeIdentifier = runtimeIdentifier;
                 task.ProjectReferencesCreatingPackages = (projectReferencesCreatingPackages ?? Enumerable.Empty<ITaskItem>()).ToArray();
                 task.ProjectLockFile = projectLockJsonFile.Path;
@@ -95,6 +115,10 @@ namespace Microsoft.NuGet.Build.Tasks.Tests
                         yield return Path.Combine(packagesDirectory, library.Name, file).Replace('/', '\\');
                     }
                 }
+
+                // Some earlier versions of NuGet didn't include the hash file in the file list, so fake that
+                // in here.
+                yield return Path.Combine(packagesDirectory, library.Name.Replace('/', '\\'), library.Name.Replace('/', '.') + ".nupkg.sha512");
             }
         }
     }

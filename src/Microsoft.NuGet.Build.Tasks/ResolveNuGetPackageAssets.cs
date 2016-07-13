@@ -44,22 +44,18 @@ namespace Microsoft.NuGet.Build.Tasks
         private readonly List<ITaskItem> _contentItems = new List<ITaskItem>();
         private readonly List<ITaskItem> _fileWrites = new List<ITaskItem>();
 
+        private readonly List<string> _packageFolders = new List<string>();
+
         private readonly Dictionary<string, string> _projectReferencesToOutputBasePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         #region UnitTestSupport
-        private readonly DirectoryExists _directoryExists = new DirectoryExists(Directory.Exists);
         private readonly FileExists _fileExists = new FileExists(File.Exists);
         private readonly TryGetRuntimeVersion _tryGetRuntimeVersion = new TryGetRuntimeVersion(TryGetRuntimeVersion);
         private readonly bool _reportExceptionsToMSBuildLogger = true;
 
-        internal ResolveNuGetPackageAssets(DirectoryExists directoryExists, FileExists fileExists, TryGetRuntimeVersion tryGetRuntimeVersion)
+        internal ResolveNuGetPackageAssets(FileExists fileExists, TryGetRuntimeVersion tryGetRuntimeVersion)
             : this()
         {
-            if (directoryExists != null)
-            {
-                _directoryExists = directoryExists;
-            }
-
             if (fileExists != null)
             {
                 _fileExists = fileExists;
@@ -72,6 +68,13 @@ namespace Microsoft.NuGet.Build.Tasks
 
             _reportExceptionsToMSBuildLogger = false;
         }
+
+        // For unit testing.
+        internal IEnumerable<string> GetPackageFolders()
+        {
+            return _packageFolders;
+        }
+
         #endregion
 
         /// <summary>
@@ -233,12 +236,49 @@ namespace Microsoft.NuGet.Build.Tasks
                 lockFile = JObject.Load(new JsonTextReader(streamReader));
             }
 
+            PopulatePackageFolders(lockFile);
+
             PopulateProjectReferenceMaps();
             GetReferences(lockFile);
             GetCopyLocalItems(lockFile);
             GetAnalyzers(lockFile);
             GetReferencedPackages(lockFile);
             ProduceContentAssets(lockFile);
+        }
+
+        private void PopulatePackageFolders(JObject lockFile)
+        {
+            // If we explicitly were given a path, let's use that
+            if (!string.IsNullOrEmpty(NuGetPackagesDirectory))
+            {
+                _packageFolders.Add(NuGetPackagesDirectory);
+            }
+
+            // Newer versions of NuGet can now specify the final list of locations in the lock file
+            var packageFolders = lockFile["packageFolders"] as JObject;
+
+            if (packageFolders != null)
+            {
+                foreach (var packageFolder in packageFolders.Properties())
+                {
+                    _packageFolders.Add(packageFolder.Name);
+                }
+            }
+
+            // If we didn't have any folders, let's fall back to the environment variable or user profile
+            if (_packageFolders.Count == 0)
+            {
+                string packagesFolder = Environment.GetEnvironmentVariable("NUGET_PACKAGES");
+
+                if (!string.IsNullOrEmpty(packagesFolder))
+                {
+                    _packageFolders.Add(packagesFolder);
+                }
+                else
+                {
+                    _packageFolders.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages"));
+                }
+            }
         }
 
         private void PopulateProjectReferenceMaps()
@@ -579,7 +619,7 @@ namespace Microsoft.NuGet.Build.Tasks
         private void ProduceContentAsset(NuGetPackageObject package, JProperty sharedAsset, IReadOnlyDictionary<string, string> preprocessorValues, string preprocessedOutputDirectory)
         {
             string pathToFinalAsset = package.GetFullPathToFile(sharedAsset.Name);
-            
+
             if (sharedAsset.Value["ppOutputPath"] != null)
             {
                 if (preprocessedOutputDirectory == null)
@@ -775,7 +815,7 @@ namespace Microsoft.NuGet.Build.Tasks
                 {
                     targetPath = Path.Combine(culture, Path.GetFileName(file.Name));
                 }
-                
+
                 var item = CreateItem(package, package.GetFullPathToFile(file.Name), targetPath);
 
                 item.SetMetadata("Private", "false");
@@ -857,32 +897,19 @@ namespace Microsoft.NuGet.Build.Tasks
 
         private string GetNuGetPackagePath(string packageId, string packageVersion)
         {
-            string packagesFolder = GetNuGetPackagesPath();
-            string packagePath = Path.Combine(packagesFolder, packageId, packageVersion);
-
-            if (!_directoryExists(packagePath))
+            foreach (var packagesFolder in _packageFolders)
             {
-                throw new ExceptionFromResource(nameof(Strings.PackageFolderNotFound), packageId, packageVersion, packagesFolder);
+                string packagePath = Path.Combine(packagesFolder, packageId, packageVersion);
+
+                // The proper way to check if a package is available is to look for the hash file, since that's the last
+                // file written as a part of the restore process. If it's not there, it means something failed part way through.
+                if (_fileExists(Path.Combine(packagePath, $"{packageId}.{packageVersion}.nupkg.sha512")))
+                {
+                    return packagePath;
+                }
             }
 
-            return packagePath;
-        }
-
-        private string GetNuGetPackagesPath()
-        {
-            if (!string.IsNullOrEmpty(NuGetPackagesDirectory))
-            {
-                return NuGetPackagesDirectory;
-            }
-
-            string packagesFolder = Environment.GetEnvironmentVariable("NUGET_PACKAGES");
-
-            if (!string.IsNullOrEmpty(packagesFolder))
-            {
-                return packagesFolder;
-            }
-
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+            throw new ExceptionFromResource(nameof(Strings.PackageFolderNotFound), packageId, packageVersion, string.Join(", ", _packageFolders));
         }
 
         private IEnumerable<NuGetPackageObject> GetPackagesFromTarget(JObject lockFile, JObject target)
@@ -897,6 +924,11 @@ namespace Microsoft.NuGet.Build.Tasks
                 var libraryObject = (JObject)lockFile["libraries"][package.Key];
 
                 Func<string> fullPackagePathGenerator;
+
+                if (libraryObject == null)
+                {
+                    throw new ExceptionFromResource(nameof(Strings.MissingPackageInTargetsSection), package.Key);
+                }
 
                 // If this is a project then we need to figure out it's relative output path
                 if ((string)libraryObject["type"] == "project")
@@ -923,7 +955,7 @@ namespace Microsoft.NuGet.Build.Tasks
                     };
                 }
                 else
-                { 
+                {
                     fullPackagePathGenerator = () => GetNuGetPackagePath(id, version);
                 }
 
