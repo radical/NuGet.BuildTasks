@@ -471,7 +471,7 @@ namespace Microsoft.NuGet.Build.Tasks
 
         private string GetPath(string packageName, string packageVersion, string file)
         {
-            return Path.Combine(GetNuGetPackagePath(packageName, packageVersion), file.Replace('/', '\\'));
+            return Path.Combine(GetNuGetPackagePath(packageName, packageVersion), file.Replace('/', Path.DirectorySeparatorChar));
         }
 
         /// <summary>
@@ -808,6 +808,19 @@ namespace Microsoft.NuGet.Build.Tasks
 
                         items.Add(pdbItem);
                     }
+
+                    // handle Mono mdb debug symbols
+                    var mdbFileName = item.ItemSpec + ".mdb";
+
+                    if (_fileExists(mdbFileName))
+                    {
+                        var mdbItem = new TaskItem(mdbFileName);
+
+                        // CopyMetadataTo also includes an OriginalItemSpec that will point to our original item, as we want
+                        item.CopyMetadataTo(mdbItem);
+
+                        items.Add(mdbItem);
+                    }
                 }
             }
 
@@ -829,7 +842,7 @@ namespace Microsoft.NuGet.Build.Tasks
 
                 if (!string.IsNullOrEmpty(destinationSubDirectory))
                 {
-                    item.SetMetadata("DestinationSubDirectory", destinationSubDirectory + "\\");
+                    item.SetMetadata("DestinationSubDirectory", destinationSubDirectory + Path.DirectorySeparatorChar);
                 }
             }
 
