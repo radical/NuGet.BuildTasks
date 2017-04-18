@@ -891,7 +891,8 @@ namespace Microsoft.NuGet.Build.Tasks
                     continue;
                 }
 
-                SplitPackageName(library.Key, out string name, out string version);
+                string name, version;
+                SplitPackageName(library.Key, out name, out version);
                 allPackageNames.Add(name);
             }
 
@@ -939,7 +940,8 @@ namespace Microsoft.NuGet.Build.Tasks
         {
             foreach (var package in target)
             {
-                SplitPackageName(package.Key, out string id, out string version);
+                string id, version;
+                SplitPackageName(package.Key, out id, out version);
 
                 var libraryObject = (JObject)lockFile["libraries"][package.Key];
 
